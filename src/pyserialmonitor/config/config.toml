@@ -5,5 +5,8 @@ subtitle = "A Serial Monitor App"
 [monitor]
 max_lines = 5000
 
+[file]
+capture_prefix = "capture"
+
 [textual]
 theme = "textual-dark"

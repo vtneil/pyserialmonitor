@@ -2,6 +2,7 @@
     dock: bottom;
     width: 100%;
     height: 1;
+    color: white;
     text-align: center;
     text-style: bold;
 }
@@ -24,6 +25,7 @@
 }
 
 #hgroup-serial {
+    height: 4;
     padding: 0 1 1 1;
 }
 

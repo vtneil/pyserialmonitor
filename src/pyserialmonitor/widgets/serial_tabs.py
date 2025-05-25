@@ -1,8 +1,13 @@
-from libgcs.serial import ALL_BAUD, ALL_BAUD_STR
-from textual import on
+import time
+
+from libgcs.file import File, FileUtil
+from libgcs.serial_tools import ALL_BAUD, ALL_BAUD_STR, SerialPort, SerialReader
+from textual import on, await_remove
 from textual.app import ComposeResult
-from textual.containers import Container, Vertical, Horizontal, HorizontalGroup
-from textual.widgets import TabbedContent, TabPane, Placeholder, Static, Label, Log, Input, Button, Switch, Select
+from textual.containers import Container, Vertical, Horizontal
+from textual.events import Focus
+from textual.widgets import TabbedContent, TabPane, Placeholder, Static, Log, Input, Button, Switch, Select, Footer, \
+    Label
 
 from ..utils.colors import *
 
@@ -15,10 +20,20 @@ class SerialMonitorTab(Static):
         ('Both CRLF', (True, True))
     ]
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, port: SerialPort, reader: SerialReader, /, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
+        self._port = port
+        self._reader = reader
+        self._port_con = False
+        self._file: File = None
+
         # TOP BAR
+        self.btn_refresh = Button(
+            'Refresh',
+            variant='default',
+            id='btn-refresh'
+        )
         self.sel_port = Select(
             [],
             prompt='Select a serial Port',
@@ -27,17 +42,19 @@ class SerialMonitorTab(Static):
         self.sel_baud = Select(
             list(zip(ALL_BAUD_STR, ALL_BAUD)),
             allow_blank=False,
+            value=115200,
             id='sel-baud'
         )
-        self.btn_serial = Button(
+        self.btn_connect = Button(
             'Connect',
             variant='success',
-            id='btn-serial'
+            id='btn-connect'
         )
         self.hgroup_serial = Horizontal(
+            self.btn_refresh,
             self.sel_port,
             self.sel_baud,
-            self.btn_serial,
+            self.btn_connect,
             id='hgroup-serial'
         )
 
@@ -52,12 +69,14 @@ class SerialMonitorTab(Static):
         self.input_user = Input(
             placeholder='Type here to send a message via Serial Port',
             valid_empty=True,
-            id='input-user'
+            id='input-user',
+            disabled=True
         )
         self.btn_send = Button(
             'Send',
             variant='primary',
-            id='btn-send'
+            id='btn-send',
+            disabled=True
         )
         self.sel_crlf = Select(
             self.SM_OPTIONS,
@@ -65,33 +84,124 @@ class SerialMonitorTab(Static):
             value=(False, True),
             id='sel-crlf'
         )
-        self.switch_time = Switch(id='switch-time')
+        self.sw_capture = Switch(id='sw-capture')
         self.hgroup_user = Horizontal(
-            self.switch_time,
+            self.sw_capture,
             Container(self.input_user),
             self.sel_crlf,
             self.btn_send,
             id='hgroup-user'
         )
 
-        self.counter = 40
-
     def on_mount(self) -> None:
-        for i in range(40):
-            self.log_monitor.write_line(f'hello world {i}')
-        self.set_interval(0.1, self.update_content)
+        options = tuple(SerialPort.ports().items())
+        if options:
+            self.sel_port.set_options(options)
+            self.sel_port.value = options[0][1]
+
+        self.set_interval(0.250, self.update_content)
+        self.set_interval(0.250, self.update_status)
+
+    @on(Button.Pressed, '#btn-refresh')
+    def handle_refresh(self) -> None:
+        options = SerialPort.ports()
+        current_value = self.sel_port.value
+        self.sel_port.set_options(tuple(options.items()))
+        if current_value in options.values():
+            self.sel_port.value = current_value
+
+    @on(Button.Pressed, '#btn-connect')
+    def handle_connect(self) -> None:
+        def btn_connect():
+            self._port_con = False
+            self.input_user.disabled = True
+            self.btn_send.disabled = True
+            self.btn_connect.variant = 'success'
+            self.btn_connect.label = 'Connect'
+
+        def btn_disconnect():
+            self._port_con = True
+            self.input_user.disabled = False
+            self.btn_send.disabled = False
+            self.btn_connect.variant = 'error'
+            self.btn_connect.label = 'Disconnect'
+
+        if not self._port_con:
+            if not self._port.is_connected():
+                if self.sel_port.selection and self._port.connect(self.sel_port.selection, self.sel_baud.selection):
+                    btn_disconnect()
+                else:
+                    self._port.disconnect()
+                    btn_connect()
+            else:
+                self._port.disconnect()
+                btn_connect()
+        else:
+            if self._port.is_connected():
+                self._port.disconnect()
+                btn_connect()
+            else:
+                self._port.disconnect()
+                btn_connect()
+                self.log_monitor.write_line(f'Disconnected')
 
     @on(Button.Pressed, '#btn-send')
-    def handle_send(self):
-        self.styles.background = StatusColor.RED
-
     @on(Input.Submitted, '#input-user')
-    def handle_input_send(self):
-        self.handle_send()
+    def handle_send(self, event: Button.Pressed | Input.Submitted) -> None:
+        text = str(self.input_user.value)
+        self.input_user.clear()
+
+        if self.sel_crlf.selection[0]:
+            text += '\r'
+        if self.sel_crlf.selection[1]:
+            text += '\n'
+
+        if self._port.is_connected():
+            self._port.device.write(text.encode())
+
+    @on(Switch.Changed, '#sw-capture')
+    def handle_capture(self, event: Switch.Changed) -> None:
+        if event.value:
+            # START RECORD
+            self._file = File(f'captures/capture_{int(time.time())}.txt', unique=True)
+        else:
+            # STOP RECORD
+            self._file = None
 
     def update_content(self) -> None:
-        self.log_monitor.write_line(f'hello world {self.counter}')
-        self.counter += 1
+        if self._reader.read() > 0:
+            stream = self._reader.get_message(-1, decode=True)
+            self.log_monitor.write(stream)
+            if self._file is not None:  # Log to the file
+                self._file.append(stream)
+
+    def update_status(self) -> None:
+        label_status: Label = self.app.query_one('#label-status')
+
+        if self._port.is_connected():
+            self.input_user.disabled = False
+            self.btn_send.disabled = False
+            label_status.styles.background = StatusColor.GREEN
+            label_status.update(f'CONNECTED to {self._port.name} with baud {self._port.baud}')
+        elif self._port.is_reconnecting():
+            self.input_user.disabled = True
+            self.btn_send.disabled = True
+            label_status.styles.background = StatusColor.ORANGE
+            label_status.update(f'RECONNECTING to {self._port.name} with baud {self._port.baud}...')
+        else:
+            self.input_user.disabled = True
+            self.btn_send.disabled = True
+            label_status.styles.background = StatusColor.RED
+            label_status.update('DISCONNECTED')
+
+    def sm_show_timestamp(self) -> None:
+        pass
+
+    def sm_capture(self) -> None:
+        self.sw_capture.toggle()
+
+    def sm_clear_output(self) -> None:
+        self.log_monitor.clear()
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -105,13 +215,13 @@ class SerialSettingsTab(Static):
         super().__init__(*args, **kwargs)
 
     def compose(self) -> ComposeResult:
-        yield Placeholder()
+        yield Placeholder('Coming soon!')
 
 
 class SerialTabs(Static):
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, port: SerialPort, reader: SerialReader, /, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.tab_monitor = SerialMonitorTab(id='tab-monitor', classes='tab-content')
+        self.tab_monitor = SerialMonitorTab(port, reader, id='tab-monitor', classes='tab-content')
         self.tab_settings = SerialSettingsTab(id='tab-settings', classes='tab-content')
 
     def compose(self) -> ComposeResult:
