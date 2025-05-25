@@ -1,0 +1,9 @@
+[app]
+title = "PySerialMonitor"
+subtitle = "A Serial Monitor App"
+
+[monitor]
+max_lines = 5000
+
+[textual]
+theme = "textual-dark"

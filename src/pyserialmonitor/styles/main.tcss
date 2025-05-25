@@ -1,0 +1,34 @@
+#label-status {
+    dock: bottom;
+    width: 100%;
+    height: 1;
+    text-align: center;
+    text-style: bold;
+}
+
+#sel-baud {
+    width: 18;
+}
+
+#input-user {
+    width: 100%;
+}
+
+#sel-crlf {
+    width: 18;
+}
+
+#hgroup-user, #hgroup-serial {
+    height: 5;
+    padding: 1;
+}
+
+#hgroup-serial {
+    padding: 0 1 1 1;
+}
+
+.tab-content {
+    width: 100%;
+    height: 100%;
+    padding: 1 2 0 2;
+}

@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "Vivatsathorn Thitasirivit", email = "vivatsathorn@outlook.co.th" }
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
     "hatchling",
     "libgcs",
@@ -20,7 +20,7 @@ dev = [
 ]
 
 [project.scripts]
-pyserialmonitor = "pyserialmonitor.main:main"
+pyserialmonitor = "pyserialmonitor.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -28,3 +28,12 @@ build-backend = "hatchling.build"
 
 [tool.uv.sources]
 libgcs = { git = "https://gitlab.com/vtneil/libgcs.git" }
+
+[tool.hatch.build]
+include = [
+    "src/pyserialmonitor/config/config.toml",
+    "src/pyserialmonitor/styles/*.tcss",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pyserialmonitor"]
