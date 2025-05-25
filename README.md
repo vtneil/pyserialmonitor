@@ -26,12 +26,17 @@ With Python **Textual** framework, you can even use mouse!
 
 ## Installation
 
+You can install via `pip`:
+
 ```bash
-pip install .
+pip install git+https://gitlab.com/vtneil/pyserialmonitor.git
 ```
 Or you can install with you favorite package manager, e.g., `uv`.
 
 ## Running
+
+You can launch the TUI via command:
+
 ```bash
 pyserialmonitor
 ```
