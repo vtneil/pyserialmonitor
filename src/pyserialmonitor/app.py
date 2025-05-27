@@ -1,5 +1,5 @@
 from libgcs.preference_tools import PreferenceTree
-from libgcs.serial_tools import SerialPort, SerialReader
+from libgcs.serial_tools import SerialPort, SerialReader, SerialThread
 from pyserialmonitor.widgets.serial_tabs import SerialMonitorTab
 from textual.app import App, ComposeResult
 from textual.containers import Container
@@ -19,6 +19,8 @@ class SerialApp(App):
         # ('f1', 'sm_show_timestamp', 'Show Timestamp'),
         ('f2', 'sm_capture', 'Start/Stop Capturing'),
         ('f3', 'sm_clear_output', 'Clear Output'),
+        ('f4', 'sm_connect', 'Connect/Disconnect'),
+        ('f5', 'sm_refresh', 'Refresh Port List'),
         ('d', 'toggle_dark', 'Toggle Light/Dark')
     ]
 
@@ -27,9 +29,11 @@ class SerialApp(App):
 
         ### Initialize the backends
         self._pref = PreferenceTree.from_file(resolve('config', 'config.toml'), fmt='toml')
-        self._port = SerialPort()
-        self._reader = SerialReader(self._port)
-        self.counter = 1
+        self._serial_port = SerialPort()
+        self._serial_reader = SerialReader(self._serial_port)
+        self._serial_thread = SerialThread(self._serial_reader)
+
+        self._serial_thread.start()
 
         ### Initialize the frontends
         self.title = self._pref['app']['title']
@@ -37,7 +41,7 @@ class SerialApp(App):
 
         self.label_status = Label('DISCONNECTED', id='label-status')
         self.label_status.styles.background = StatusColor.RED
-        self.tabs_serial = SerialTabs(self._port, self._reader, id='tabs-serial')
+        self.tabs_serial = SerialTabs(self._serial_port, self._serial_reader, self._serial_thread, id='tabs-serial')
 
     def on_mount(self) -> None:
         self.theme = self._pref['textual']['theme']
@@ -57,6 +61,12 @@ class SerialApp(App):
 
     def action_sm_clear_output(self) -> None:
         self.query_one(SerialMonitorTab).sm_clear_output()
+
+    def action_sm_connect(self) -> None:
+        self.query_one(SerialMonitorTab).handle_connect()
+
+    def action_sm_refresh(self) -> None:
+        self.query_one(SerialMonitorTab).handle_refresh()
 
     def compose(self) -> ComposeResult:
         yield Header()
