@@ -70,6 +70,13 @@ class SerialMonitorTab(Static):
             id='log-monitor'
         )
 
+        # HEX MONITOR
+        self.hex_monitor = Log(
+            highlight=False,
+            auto_scroll=True,
+            id='hex-monitor'
+        )
+
         # BOTTOM BAR
         self.input_user = Input(
             placeholder='Type here to send a message via Serial Port',
@@ -104,8 +111,8 @@ class SerialMonitorTab(Static):
             self.sel_port.set_options(options)
             self.sel_port.value = options[0][1]
 
-        self.set_interval(0.250, self.update_content)
-        self.set_interval(0.250, self.update_status)
+        self.set_interval(0.050, self.update_content)
+        self.set_interval(0.050, self.update_status)
 
     @on(Button.Pressed, '#btn-refresh')
     def handle_refresh(self) -> None:
@@ -178,10 +185,12 @@ class SerialMonitorTab(Static):
 
     def update_content(self) -> None:
         if self._serial_thread.size():
-            stream: str = self._serial_thread.get().decode()
-            self.log_monitor.write(stream)  # Log to monitor
+            stream: bytes = self._serial_thread.get()
+            stream_str: str = stream.decode()
+            self.log_monitor.write(stream_str)  # Log to monitor
+            self.hex_monitor.write_line(' '.join(f'{b:02X}' for b in stream))  # Log to hex monitor
             if self._file is not None:  # Log to file
-                self._file.append(stream)
+                self._file.append(stream_str)
 
     def update_status(self) -> None:
         label_status: Label = self.app.query_one('#label-status')
@@ -211,11 +220,16 @@ class SerialMonitorTab(Static):
     @on(Button.Pressed, '#btn-clear')
     def sm_clear_output(self) -> None:
         self.log_monitor.clear()
+        self.hex_monitor.clear()
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield self.hgroup_serial
-            yield self.log_monitor
+            with TabbedContent():
+                with TabPane('ASCII View'):
+                    yield self.log_monitor
+                with TabPane('Hex View'):
+                    yield self.hex_monitor
             yield self.hgroup_user
 
 
@@ -235,10 +249,8 @@ class SerialTabs(Static):
 
     def compose(self) -> ComposeResult:
         with TabbedContent():
-            with TabPane('Monitor',
-                         id='pane-monitor'):
+            with TabPane('Monitor'):
                 yield Container(self.tab_monitor)
 
-            with TabPane('Settings',
-                         id='pane-settings'):
+            with TabPane('Settings'):
                 yield Container(self.tab_settings)
