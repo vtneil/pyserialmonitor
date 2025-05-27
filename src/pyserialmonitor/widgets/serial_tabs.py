@@ -28,6 +28,11 @@ class SerialMonitorTab(Static):
         self._file: File | None = None
 
         # TOP BAR
+        self.btn_clear = Button(
+            'Clear',
+            variant='default',
+            id='btn-clear'
+        )
         self.btn_refresh = Button(
             'Refresh',
             variant='default',
@@ -50,6 +55,7 @@ class SerialMonitorTab(Static):
             id='btn-connect'
         )
         self.hgroup_serial = Horizontal(
+            self.btn_clear,
             self.btn_refresh,
             self.sel_port,
             self.sel_baud,
@@ -202,6 +208,7 @@ class SerialMonitorTab(Static):
     def sm_capture(self) -> None:
         self.sw_capture.toggle()
 
+    @on(Button.Pressed, '#btn-clear')
     def sm_clear_output(self) -> None:
         self.log_monitor.clear()
 
