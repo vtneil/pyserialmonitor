@@ -69,6 +69,7 @@ class SerialMonitorTab(Static):
             auto_scroll=True,
             id='log-monitor'
         )
+        self.log_monitor.styles.padding = (0, 0, 4, 0)
 
         # HEX MONITOR
         self.hex_monitor = Log(
@@ -76,6 +77,7 @@ class SerialMonitorTab(Static):
             auto_scroll=True,
             id='hex-monitor'
         )
+        self.hex_monitor.styles.padding = (0, 0, 4, 0)
 
         # BOTTOM BAR
         self.input_user = Input(
@@ -227,10 +229,10 @@ class SerialMonitorTab(Static):
             yield self.hgroup_serial
             with TabbedContent():
                 with TabPane('ASCII View'):
-                    yield self.log_monitor
+                    yield Container(self.log_monitor)
                 with TabPane('Hex View'):
-                    yield self.hex_monitor
-            yield self.hgroup_user
+                    yield Container(self.hex_monitor)
+            yield Container(self.hgroup_user)
 
 
 class SerialSettingsTab(Static):
