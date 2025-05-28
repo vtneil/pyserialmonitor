@@ -186,7 +186,7 @@ class SerialMonitorTab(Static):
     def update_content(self) -> None:
         if self._serial_thread.size():
             stream: bytes = self._serial_thread.get()
-            stream_str: str = stream.decode()
+            stream_str: str = stream.decode(encoding='latin-1')
             self.log_monitor.write(stream_str)  # Log to monitor
             self.hex_monitor.write_line(' '.join(f'{b:02X}' for b in stream))  # Log to hex monitor
             if self._file is not None:  # Log to file
