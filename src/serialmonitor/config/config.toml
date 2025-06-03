@@ -1,5 +1,5 @@
 [app]
-title = "PySerialMonitor"
+title = "Python-SerialMonitor"
 subtitle = "A Serial Monitor App"
 
 [monitor]

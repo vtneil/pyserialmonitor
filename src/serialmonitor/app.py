@@ -1,6 +1,6 @@
 from libgcs.preference_tools import PreferenceTree
 from libgcs.serial_tools import SerialPort, SerialReader, SerialThread
-from pyserialmonitor.widgets.serial_tabs import SerialMonitorTab
+from .widgets.serial_tabs import SerialMonitorTab
 from textual.app import App, ComposeResult
 from textual.containers import Container
 from textual.widgets import Header, Footer, Label

@@ -1,5 +1,5 @@
 [project]
-name = "pyserialmonitor"
+name = "python-serialmonitor"
 version = "1.1.0"
 description = "Python Serial Monitor"
 readme = "README.md"
@@ -21,7 +21,7 @@ dev = [
 ]
 
 [project.scripts]
-serialmonitor = "pyserialmonitor.__main__:main"
+serialmonitor = "serialmonitor.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -31,10 +31,13 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [tool.hatch.build]
+packages = [
+    "serialmonitor"
+]
 include = [
-    "src/pyserialmonitor/config/config.toml",
-    "src/pyserialmonitor/styles/*.tcss",
+    "src/serialmonitor/config/config.toml",
+    "src/serialmonitor/styles/*.tcss",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/pyserialmonitor"]
+packages = ["src/serialmonitor"]
