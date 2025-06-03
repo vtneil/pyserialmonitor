@@ -29,11 +29,11 @@ With Python **Textual** framework, you can even use mouse!
 You can install via `pip`:
 (1.) Latest official release on PyPI
 ```bash
-pip install python-serialmonitor
+pip install --upgrade python-serialmonitor
 ```
 (2.) Directly from the git repository
 ```bash
-pip install git+https://gitlab.com/vtneil/python-serialmonitor.git
+pip install --upgrade git+https://gitlab.com/vtneil/python-serialmonitor.git
 ```
 Or you can install with your favorite package manager, e.g., `uv`.
 
