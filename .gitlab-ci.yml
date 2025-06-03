@@ -1,0 +1,17 @@
+stages:
+  - publish
+
+variables:
+  PYTHON_VERSION: "3.13"
+
+before_script:
+  - pip install uv
+
+publish:
+  stage: publish
+  image: python:${PYTHON_VERSION}
+  script:
+    - uv build
+    - uv publish --token ${PYPI_TOKEN}
+  only:
+    - release

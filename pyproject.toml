@@ -9,7 +9,8 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "hatchling",
-    "libgcs @ git+https://gitlab.com/vtneil/libgcs.git",
+    "libgcs",
+    #    "libgcs @ git+https://gitlab.com/vtneil/libgcs.git",
     "pyserial",
     "textual",
 ]
