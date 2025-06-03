@@ -1,6 +1,6 @@
-# PySerialMonitor
+# Python-SerialMonitor
 
-**PySerialMonitor** is a Python-based TUI (Text User Interface) Serial Monitor application designed for interacting with serial devices (e.g., microcontrollers like Teensy, Arduino) in a clean, keyboard-driven terminal interface.
+**Python-SerialMonitor** is a Python-based TUI (Text User Interface) Serial Monitor application designed for interacting with serial devices (e.g., microcontrollers like Teensy, Arduino) in a clean, keyboard-driven terminal interface.
 
 With Python **Textual** framework, you can even use mouse!
 
