@@ -44,3 +44,7 @@ You can launch the TUI via command:
 ```bash
 serialmonitor
 ```
+Or
+```bash
+python -m serialmonitor
+```
