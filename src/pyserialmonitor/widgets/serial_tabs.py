@@ -4,10 +4,31 @@ from libgcs.file import File
 from libgcs.serial_tools import ALL_BAUD, ALL_BAUD_STR, SerialPort, SerialReader, SerialThread
 from textual import on
 from textual.app import ComposeResult
-from textual.containers import Container, Vertical, Horizontal
+from textual.containers import Container, Vertical, Horizontal, VerticalScroll, HorizontalScroll
 from textual.widgets import TabbedContent, TabPane, Placeholder, Static, Log, Input, Button, Switch, Select, Label
 
 from ..utils.colors import *
+
+
+class DualMonitor(Static):
+    def __init__(self, log_monitor, hex_monitor, sbs_log, sbs_hex):
+        super().__init__()
+        self.log_monitor = log_monitor
+        self.hex_monitor = hex_monitor
+        self.sbs_log = sbs_log
+        self.sbs_hex = sbs_hex
+
+    def compose(self) -> ComposeResult:
+        with TabbedContent(id='tabbed-log'):
+            with TabPane('ASCII View'):
+                yield self.log_monitor
+            with TabPane('Hex View'):
+                yield self.hex_monitor
+            with TabPane('Side-by-Side'):
+                yield Container(HorizontalScroll(
+                    self.sbs_log,
+                    self.sbs_hex,
+                ))
 
 
 class SerialMonitorTab(Static):
@@ -26,6 +47,7 @@ class SerialMonitorTab(Static):
         self._serial_thread = thread
         self._port_con = False
         self._file: File | None = None
+        self._is_init = False
 
         # TOP BAR
         self.btn_clear = Button(
@@ -69,7 +91,6 @@ class SerialMonitorTab(Static):
             auto_scroll=True,
             id='log-monitor'
         )
-        self.log_monitor.styles.padding = (0, 0, 4, 0)
 
         # HEX MONITOR
         self.hex_monitor = Log(
@@ -77,7 +98,18 @@ class SerialMonitorTab(Static):
             auto_scroll=True,
             id='hex-monitor'
         )
-        self.hex_monitor.styles.padding = (0, 0, 4, 0)
+
+        # SBS MONITOR
+        self.sbs_log = Log(
+            highlight=False,
+            auto_scroll=True,
+            id='sbs-log'
+        )
+        self.sbs_hex = Log(
+            highlight=False,
+            auto_scroll=True,
+            id='sbs-hex'
+        )
 
         # BOTTOM BAR
         self.input_user = Input(
@@ -124,6 +156,16 @@ class SerialMonitorTab(Static):
         self.sel_port.set_options(tuple(options.items()))
         if current_value in options.values():
             self.sel_port.value = current_value
+
+    @on(Select.Changed, '#sel-baud')
+    def test(self) -> None:
+        if not self._is_init:
+            self._is_init = True
+            return
+
+        if self._port_con and self._serial_port.is_connected():
+            self.handle_connect()
+            self.handle_connect()
 
     @on(Button.Pressed, '#btn-connect')
     def handle_connect(self) -> None:
@@ -189,8 +231,11 @@ class SerialMonitorTab(Static):
         if self._serial_thread.size():
             stream: bytes = self._serial_thread.get()
             stream_str: str = stream.decode(encoding='latin-1')
+            hex_str: str = ' '.join(f'{b:02X}' for b in stream)
             self.log_monitor.write(stream_str)  # Log to monitor
-            self.hex_monitor.write_line(' '.join(f'{b:02X}' for b in stream))  # Log to hex monitor
+            self.sbs_log.write(stream_str)  # Log to SBS monitor
+            self.hex_monitor.write_line(hex_str)  # Log to hex monitor
+            self.sbs_hex.write_line(hex_str)  # Log to SBS hex monitor
             if self._file is not None:  # Log to file
                 self._file.append(stream_str)
 
@@ -223,16 +268,18 @@ class SerialMonitorTab(Static):
     def sm_clear_output(self) -> None:
         self.log_monitor.clear()
         self.hex_monitor.clear()
+        self.sbs_log.clear()
+        self.sbs_hex.clear()
 
     def compose(self) -> ComposeResult:
-        with Vertical():
+        sbs = DualMonitor(log_monitor=self.log_monitor,
+                          hex_monitor=self.hex_monitor,
+                          sbs_log=self.sbs_log,
+                          sbs_hex=self.sbs_hex)
+        with VerticalScroll():
             yield self.hgroup_serial
-            with TabbedContent():
-                with TabPane('ASCII View'):
-                    yield Container(self.log_monitor)
-                with TabPane('Hex View'):
-                    yield Container(self.hex_monitor)
-            yield Container(self.hgroup_user)
+            yield Container(sbs, id='con-dual')
+            yield self.hgroup_user
 
 
 class SerialSettingsTab(Static):
