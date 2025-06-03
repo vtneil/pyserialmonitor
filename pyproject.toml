@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "python-serialmonitor"
-version = "1.1.3"
+version = "1.1.4"
 description = "Python Serial Monitor"
 readme = "README.md"
 authors = [
@@ -24,15 +24,14 @@ dev = [
 ]
 
 [project.scripts]
-serialmonitor = "serialmonitor.__main__:main"
+serialmonitor = "serialmonitor.run:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true
 
 [tool.hatch.build]
 include = [
-    "src/serialmonitor/config/config.toml",
-    "src/serialmonitor/styles/*.tcss",
+    "src/serialmonitor/**",
 ]
 
 [tool.hatch.build.targets.wheel]
