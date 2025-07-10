@@ -1,6 +1,6 @@
 import time
 
-from libgcs.file import File
+from libgcs.file import File as GCSFile
 from libgcs.serial_tools import ALL_BAUD, ALL_BAUD_STR, SerialPort, SerialReader, SerialThread
 from textual import on
 from textual.app import ComposeResult
@@ -8,6 +8,7 @@ from textual.containers import Container, Vertical, Horizontal, VerticalScroll, 
 from textual.widgets import TabbedContent, TabPane, Placeholder, Static, Log, Input, Button, Switch, Select, Label
 
 from ..utils.colors import *
+from ..utils import printable_bytes
 
 
 class DualMonitor(Static):
@@ -46,7 +47,7 @@ class SerialMonitorTab(Static):
         self._serial_reader = reader
         self._serial_thread = thread
         self._port_con = False
-        self._file: File | None = None
+        self._file: GCSFile | None = None
         self._is_init = False
 
         # TOP BAR
@@ -222,7 +223,7 @@ class SerialMonitorTab(Static):
     def handle_capture(self, event: Switch.Changed) -> None:
         if event.value:
             # START RECORD
-            self._file = File(f'captures/capture_{int(time.time())}.txt', unique=True)
+            self._file = GCSFile(f'captures/capture_{int(time.time())}.txt', unique=True)
         else:
             # STOP RECORD
             self._file = None
@@ -230,7 +231,7 @@ class SerialMonitorTab(Static):
     def update_content(self) -> None:
         if self._serial_thread.size():
             stream: bytes = self._serial_thread.get()
-            stream_str: str = stream.decode(encoding='latin-1')
+            stream_str: str = printable_bytes(stream)
             hex_str: str = ' '.join(f'{b:02X}' for b in stream)
             self.log_monitor.write(stream_str)  # Log to monitor
             self.sbs_log.write(stream_str)  # Log to SBS monitor
@@ -240,7 +241,7 @@ class SerialMonitorTab(Static):
                 self._file.append(stream_str)
 
     def update_status(self) -> None:
-        label_status: Label = self.app.query_one('#label-status')
+        label_status: Label = self.app.query_one('#label-status', Label)
 
         if self._serial_port.is_connected():
             self.input_user.disabled = False
