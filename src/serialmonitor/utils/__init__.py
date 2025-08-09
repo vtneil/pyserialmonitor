@@ -7,7 +7,7 @@ def resolve(*names: str):
 
 def printable_bytes(byte_string: bytes) -> str:
     return ''.join(
-        chr(b) if (32 <= b <= 126) or b == 10 or b == 13 else '*'  # Printable ASCII range + CRLF
+        chr(b) if chr(b).isprintable() or b in (9, 10, 13) else '*'  # Printable ASCII range + CRLF
         for b in byte_string
     )
 
