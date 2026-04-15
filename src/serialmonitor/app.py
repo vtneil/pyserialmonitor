@@ -16,7 +16,7 @@ class SerialApp(App):
     ]
 
     BINDINGS = [
-        # ('f1', 'sm_show_timestamp', 'Show Timestamp'),
+        ('f1', 'sm_show_timestamp', 'Timestamps On/Off'),
         ('f2', 'sm_capture', 'Start/Stop Capturing'),
         ('f3', 'sm_clear_output', 'Clear Output'),
         ('f4', 'sm_connect', 'Connect/Disconnect'),
@@ -39,9 +39,12 @@ class SerialApp(App):
         self.title = self._pref['app']['title']
         self.sub_title = self._pref['app']['subtitle']
 
+        max_lines = self._pref['monitor'].get('max_lines', 5000)
+
         self.label_status = Label('DISCONNECTED', id='label-status')
         self.label_status.styles.background = StatusColor.RED
-        self.tabs_serial = SerialTabs(self._serial_port, self._serial_reader, self._serial_thread, id='tabs-serial')
+        self.tabs_serial = SerialTabs(self._serial_port, self._serial_reader, self._serial_thread,
+                                      max_lines=max_lines, id='tabs-serial')
 
     def on_mount(self) -> None:
         self.theme = self._pref['textual']['theme']

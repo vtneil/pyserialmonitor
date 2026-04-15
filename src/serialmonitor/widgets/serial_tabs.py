@@ -1,10 +1,11 @@
 import time
+from datetime import datetime
 
 from libgcs.file import File as GCSFile
 from libgcs.serial_tools import ALL_BAUD, ALL_BAUD_STR, SerialPort, SerialReader, SerialThread
 from textual import on
 from textual.app import ComposeResult
-from textual.containers import Container, Vertical, Horizontal, VerticalScroll, HorizontalScroll
+from textual.containers import Container, Horizontal, VerticalScroll, HorizontalScroll
 from textual.widgets import TabbedContent, TabPane, Placeholder, Static, Log, Input, Button, Switch, Select, Label
 
 from ..utils.colors import *
@@ -40,7 +41,8 @@ class SerialMonitorTab(Static):
         ('Both CRLF', (True, True))
     ]
 
-    def __init__(self, port: SerialPort, reader: SerialReader, thread: SerialThread, /, *args, **kwargs) -> None:
+    def __init__(self, port: SerialPort, reader: SerialReader, thread: SerialThread, /,
+                 max_lines: int | None = None, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
         self._serial_port = port
@@ -48,7 +50,10 @@ class SerialMonitorTab(Static):
         self._serial_thread = thread
         self._port_con = False
         self._file: GCSFile | None = None
-        self._is_init = False
+        self._baud_init = False         # suppress first baud-rate changed event
+        self._show_timestamps = False
+        self._at_line_start = True      # tracks whether ASCII cursor is at start of a new line
+        self._bytes_received = 0
 
         # TOP BAR
         self.btn_clear = Button(
@@ -90,6 +95,7 @@ class SerialMonitorTab(Static):
         self.log_monitor = Log(
             highlight=False,
             auto_scroll=True,
+            max_lines=max_lines,
             id='log-monitor'
         )
 
@@ -97,6 +103,7 @@ class SerialMonitorTab(Static):
         self.hex_monitor = Log(
             highlight=False,
             auto_scroll=True,
+            max_lines=max_lines,
             id='hex-monitor'
         )
 
@@ -104,11 +111,13 @@ class SerialMonitorTab(Static):
         self.sbs_log = Log(
             highlight=False,
             auto_scroll=True,
+            max_lines=max_lines,
             id='sbs-log'
         )
         self.sbs_hex = Log(
             highlight=False,
             auto_scroll=True,
+            max_lines=max_lines,
             id='sbs-hex'
         )
 
@@ -134,11 +143,30 @@ class SerialMonitorTab(Static):
         self.sw_capture = Switch(id='sw-capture')
         self.hgroup_user = Horizontal(
             self.sw_capture,
+            Label('Capture', id='label-capture'),
             Container(self.input_user),
             self.sel_crlf,
             self.btn_send,
             id='hgroup-user'
         )
+
+    # ── UI state helpers ──────────────────────────────────────────────────────
+
+    def _set_connected_state(self) -> None:
+        self._port_con = True
+        self.input_user.disabled = False
+        self.btn_send.disabled = False
+        self.btn_connect.variant = 'error'
+        self.btn_connect.label = 'Disconnect'
+
+    def _set_disconnected_state(self) -> None:
+        self._port_con = False
+        self.input_user.disabled = True
+        self.btn_send.disabled = True
+        self.btn_connect.variant = 'success'
+        self.btn_connect.label = 'Connect'
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def on_mount(self) -> None:
         options = tuple(SerialPort.ports().items())
@@ -149,6 +177,8 @@ class SerialMonitorTab(Static):
         self.set_interval(0.050, self.update_content)
         self.set_interval(0.050, self.update_status)
 
+    # ── Top-bar handlers ──────────────────────────────────────────────────────
+
     @on(Button.Pressed, '#btn-refresh')
     def handle_refresh(self) -> None:
         self._serial_port.refresh()
@@ -157,110 +187,183 @@ class SerialMonitorTab(Static):
         self.sel_port.set_options(tuple(options.items()))
         if current_value in options.values():
             self.sel_port.value = current_value
+        self.app.notify('Port list refreshed.')
 
     @on(Select.Changed, '#sel-baud')
-    def test(self) -> None:
-        if not self._is_init:
-            self._is_init = True
+    def handle_baud_changed(self) -> None:
+        # Suppress the synthetic event fired during widget initialisation.
+        if not self._baud_init:
+            self._baud_init = True
             return
 
         if self._port_con and self._serial_port.is_connected():
-            self.handle_connect()
-            self.handle_connect()
+            port = self._serial_port.name
+            baud = int(self.sel_baud.selection or 115200)
+            self._serial_port.disconnect()
+            success = port is not None and self._serial_port.connect(port, baud)
+            if success:
+                self.app.notify(f'Reconnected at {baud} baud.')
+            else:
+                self._set_disconnected_state()
+                self.app.notify(f'Could not reconnect at {baud} baud.', severity='error')
+
+    @on(Select.Changed, '#sel-port')
+    def handle_port_changed(self) -> None:
+        # Only act when already connected – switch to the newly selected port.
+        if self._port_con and self._serial_port.is_connected():
+            port = str(self.sel_port.selection or '')
+            baud = int(self.sel_baud.selection or 115200)
+            self._serial_port.disconnect()
+            success = bool(port) and self._serial_port.connect(port, baud)
+            if success:
+                self.app.notify(f'Switched to {port}.')
+            else:
+                self._set_disconnected_state()
+                self.app.notify(f'Could not connect to {port}.', severity='error')
 
     @on(Button.Pressed, '#btn-connect')
     def handle_connect(self) -> None:
-        def btn_connect():
-            self._port_con = False
-            self.input_user.disabled = True
-            self.btn_send.disabled = True
-            self.btn_connect.variant = 'success'
-            self.btn_connect.label = 'Connect'
-
-        def btn_disconnect():
-            self._port_con = True
-            self.input_user.disabled = False
-            self.btn_send.disabled = False
-            self.btn_connect.variant = 'error'
-            self.btn_connect.label = 'Disconnect'
-
         if not self._port_con:
-            if not self._serial_port.is_connected():
-                port = self.sel_port.selection
-                baud = self.sel_baud.selection
-                success = port is not None and self._serial_port.connect(port, baud)
-                if port and success:
-                    btn_disconnect()
-                else:
-                    self._serial_port.disconnect()
-                    btn_connect()
-            else:
-                self._serial_port.disconnect()
-                btn_connect()
-        else:
+            # ── Connect ───────────────────────────────────────────────────────
             if self._serial_port.is_connected():
+                # Stale state: already connected but flag says otherwise.
                 self._serial_port.disconnect()
-                btn_connect()
+
+            port = self.sel_port.selection
+            baud = self.sel_baud.selection
+
+            if port is None:
+                self.app.notify('No serial port selected.', severity='warning')
+                return
+
+            success = self._serial_port.connect(str(port), int(baud or 115200))
+            if success:
+                self._set_connected_state()
+                self.app.notify(f'Connected to {port} at {baud} baud.', severity='information')
             else:
-                self._serial_port.disconnect()
-                btn_connect()
+                self.app.notify(f'Failed to connect to {port}.', severity='error')
+        else:
+            # ── Disconnect ────────────────────────────────────────────────────
+            self._serial_port.disconnect()
+            self._set_disconnected_state()
+            self.app.notify('Disconnected.')
+
+    # ── Bottom-bar handlers ───────────────────────────────────────────────────
 
     @on(Button.Pressed, '#btn-send')
     @on(Input.Submitted, '#input-user')
-    def handle_send(self, event: Button.Pressed | Input.Submitted) -> None:
+    def handle_send(self, _event: Button.Pressed | Input.Submitted) -> None:
         text = str(self.input_user.value)
         self.input_user.clear()
 
-        if self.sel_crlf.selection[0]:
+        cr, lf = self.sel_crlf.selection or (False, True)
+        if cr:
             text += '\r'
-        if self.sel_crlf.selection[1]:
+        if lf:
             text += '\n'
 
         if self._serial_port.is_connected():
-            self._serial_port.device.write(text.encode())
+            try:
+                self._serial_port.device.write(text.encode())
+            except OSError as exc:
+                self.app.notify(f'Send failed: {exc}', severity='error')
 
     @on(Switch.Changed, '#sw-capture')
     def handle_capture(self, event: Switch.Changed) -> None:
         if event.value:
-            # START RECORD
-            self._file = GCSFile(f'captures/capture_{int(time.time())}.txt', unique=True)
+            capture_file = GCSFile(f'captures/capture_{int(time.time())}.txt', unique=True)
+            self._file = capture_file
+            self.app.notify(f'Capturing to {capture_file.path}', severity='information')
         else:
-            # STOP RECORD
             self._file = None
+            self.app.notify('Capture stopped.')
+
+    # ── Timestamp helpers ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _format_timestamp() -> str:
+        now = datetime.now()
+        return f'[{now.strftime("%H:%M:%S")}.{now.microsecond // 1000:03d}] '
+
+    def _ascii_with_timestamps(self, text: str) -> str:
+        """Prepend a timestamp at the start of each new line in text."""
+        ts = self._format_timestamp()
+        result: list[str] = []
+        for ch in text:
+            if self._at_line_start and ch not in ('\r', '\n'):
+                result.append(ts)
+                self._at_line_start = False
+            result.append(ch)
+            if ch == '\n':
+                self._at_line_start = True
+        return ''.join(result)
+
+    # ── Periodic update callbacks ─────────────────────────────────────────────
 
     def update_content(self) -> None:
-        if self._serial_thread.size():
-            stream: bytes = self._serial_thread.get()
-            stream_str: str = printable_bytes(stream)
-            hex_str: str = ' '.join(f'{b:02X}' for b in stream)
-            self.log_monitor.write(stream_str)  # Log to monitor
-            self.sbs_log.write(stream_str)  # Log to SBS monitor
-            self.hex_monitor.write_line(hex_str)  # Log to hex monitor
-            self.sbs_hex.write_line(hex_str)  # Log to SBS hex monitor
-            if self._file is not None:  # Log to file
-                self._file.append(stream_str)
+        if not self._serial_thread.size():
+            return
+
+        stream: bytes = self._serial_thread.get()
+        self._bytes_received += len(stream)
+
+        stream_str: str = printable_bytes(stream)
+        hex_str: str = ' '.join(f'{b:02X}' for b in stream)
+
+        if self._show_timestamps:
+            display_str = self._ascii_with_timestamps(stream_str)
+            hex_display = f'{self._format_timestamp()}{hex_str}'
+        else:
+            display_str = stream_str
+            hex_display = hex_str
+
+        self.log_monitor.write(display_str)
+        self.sbs_log.write(display_str)
+        self.hex_monitor.write_line(hex_display)
+        self.sbs_hex.write_line(hex_display)
+
+        if self._file is not None:
+            self._file.append(stream_str)
 
     def update_status(self) -> None:
         label_status: Label = self.app.query_one('#label-status', Label)
 
+        kb = self._bytes_received / 1024
+        rx = f'{kb:.1f} KB' if kb >= 1 else f'{self._bytes_received} B'
+
         if self._serial_port.is_connected():
             self.input_user.disabled = False
             self.btn_send.disabled = False
+            if not self._port_con:
+                # Auto-reconnect succeeded – sync button state.
+                self._set_connected_state()
             label_status.styles.background = StatusColor.GREEN
-            label_status.update(f'CONNECTED to {self._serial_port.name} with baud {self._serial_port.baud}')
+            label_status.update(
+                f'CONNECTED to {self._serial_port.name} @ {self._serial_port.baud} baud  |  RX {rx}'
+            )
         elif self._serial_port.is_reconnecting():
             self.input_user.disabled = True
             self.btn_send.disabled = True
             label_status.styles.background = StatusColor.ORANGE
-            label_status.update(f'RECONNECTING to {self._serial_port.name} with baud {self._serial_port.baud}...')
+            label_status.update(
+                f'RECONNECTING to {self._serial_port.name} @ {self._serial_port.baud} baud…'
+            )
         else:
             self.input_user.disabled = True
             self.btn_send.disabled = True
+            if self._port_con:
+                # Device was lost – sync button state.
+                self._set_disconnected_state()
             label_status.styles.background = StatusColor.RED
-            label_status.update('DISCONNECTED')
+            label_status.update(f'DISCONNECTED  |  RX {rx}')
+
+    # ── Action methods (called from app bindings) ─────────────────────────────
 
     def sm_show_timestamp(self) -> None:
-        pass
+        self._show_timestamps = not self._show_timestamps
+        self._at_line_start = True  # reset so next line gets a fresh timestamp
+        state = 'ON' if self._show_timestamps else 'OFF'
+        self.app.notify(f'Timestamps {state}.')
 
     def sm_capture(self) -> None:
         self.sw_capture.toggle()
@@ -271,6 +374,8 @@ class SerialMonitorTab(Static):
         self.hex_monitor.clear()
         self.sbs_log.clear()
         self.sbs_hex.clear()
+        self._bytes_received = 0
+        self._at_line_start = True
 
     def compose(self) -> ComposeResult:
         sbs = DualMonitor(log_monitor=self.log_monitor,
@@ -292,9 +397,12 @@ class SerialSettingsTab(Static):
 
 
 class SerialTabs(Static):
-    def __init__(self, port: SerialPort, reader: SerialReader, thread: SerialThread, /, *args, **kwargs) -> None:
+    def __init__(self, port: SerialPort, reader: SerialReader, thread: SerialThread, /,
+                 max_lines: int | None = None, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.tab_monitor = SerialMonitorTab(port, reader, thread, id='tab-monitor', classes='tab-content')
+        self.tab_monitor = SerialMonitorTab(port, reader, thread,
+                                            max_lines=max_lines,
+                                            id='tab-monitor', classes='tab-content')
         self.tab_settings = SerialSettingsTab(id='tab-settings', classes='tab-content')
 
     def compose(self) -> ComposeResult:

@@ -29,8 +29,15 @@
     padding: 0 1 1 1;
 }
 
+#label-capture {
+    width: auto;
+    height: 1;
+    margin: 1 1 0 0;
+    content-align: left middle;
+}
+
 #con-dual {
-    min_height: 16;
+    min-height: 16;
 }
 
 #tab-sbs {
