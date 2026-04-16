@@ -1,15 +1,24 @@
+import csv
+import io
 import time
 from datetime import datetime
 
 from libgcs.file import File as GCSFile
 from libgcs.serial_tools import ALL_BAUD, ALL_BAUD_STR, SerialPort, SerialReader, SerialThread
+from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, VerticalScroll, HorizontalScroll
-from textual.widgets import TabbedContent, TabPane, Placeholder, Static, Log, Input, Button, Switch, Select, Label
+from textual.widgets import TabbedContent, TabPane, Placeholder, Static, Log, RichLog, Input, Button, Switch, Select, Label
 
 from ..utils.colors import *
 from ..utils import printable_bytes
+
+_CSV_COLORS = [
+    'cyan', 'yellow', 'green', 'magenta',
+    'bright_red', 'bright_blue', 'bright_cyan', 'bright_yellow',
+    'bright_green', 'bright_magenta',
+]
 
 
 class DualMonitor(Static):
@@ -52,7 +61,7 @@ class SerialMonitorTab(Static):
         self._file: GCSFile | None = None
         self._baud_init = False         # suppress first baud-rate changed event
         self._show_timestamps = False
-        self._at_line_start = True      # tracks whether ASCII cursor is at start of a new line
+        self._line_buffer: str = ''     # partial-line accumulator for CSV detection
         self._bytes_received = 0
 
         # TOP BAR
@@ -92,7 +101,7 @@ class SerialMonitorTab(Static):
         )
 
         # LOG MONITOR
-        self.log_monitor = Log(
+        self.log_monitor = RichLog(
             highlight=False,
             auto_scroll=True,
             max_lines=max_lines,
@@ -108,7 +117,7 @@ class SerialMonitorTab(Static):
         )
 
         # SBS MONITOR
-        self.sbs_log = Log(
+        self.sbs_log = RichLog(
             highlight=False,
             auto_scroll=True,
             max_lines=max_lines,
@@ -285,18 +294,40 @@ class SerialMonitorTab(Static):
         now = datetime.now()
         return f'[{now.strftime("%H:%M:%S")}.{now.microsecond // 1000:03d}] '
 
-    def _ascii_with_timestamps(self, text: str) -> str:
-        """Prepend a timestamp at the start of each new line in text."""
-        ts = self._format_timestamp()
-        result: list[str] = []
-        for ch in text:
-            if self._at_line_start and ch not in ('\r', '\n'):
-                result.append(ts)
-                self._at_line_start = False
-            result.append(ch)
-            if ch == '\n':
-                self._at_line_start = True
-        return ''.join(result)
+    # ── CSV helpers ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _colorize_csv(line: str) -> Text | None:
+        """Return a Rich Text with each CSV column in a distinct color, or None if not CSV."""
+        if ',' not in line:
+            return None
+        try:
+            fields = next(csv.reader(io.StringIO(line)))
+        except Exception:
+            return None
+        if len(fields) < 2:
+            return None
+        result = Text()
+        for i, field in enumerate(fields):
+            if i > 0:
+                result.append(',')
+            result.append(field, style=_CSV_COLORS[i % len(_CSV_COLORS)])
+        return result
+
+    def _write_ascii_line(self, line: str) -> None:
+        """Write one logical line (no trailing newline) to the ASCII monitors."""
+        csv_text = self._colorize_csv(line)
+        if self._show_timestamps:
+            ts = self._format_timestamp()
+            if csv_text is not None:
+                display = Text(ts)
+                display.append_text(csv_text)
+            else:
+                display = Text(ts + line)
+        else:
+            display = csv_text if csv_text is not None else Text(line)
+        self.log_monitor.write(display)
+        self.sbs_log.write(display)
 
     # ── Periodic update callbacks ─────────────────────────────────────────────
 
@@ -311,16 +342,22 @@ class SerialMonitorTab(Static):
         hex_str: str = ' '.join(f'{b:02X}' for b in stream)
 
         if self._show_timestamps:
-            display_str = self._ascii_with_timestamps(stream_str)
             hex_display = f'{self._format_timestamp()}{hex_str}'
         else:
-            display_str = stream_str
             hex_display = hex_str
-
-        self.log_monitor.write(display_str)
-        self.sbs_log.write(display_str)
         self.hex_monitor.write_line(hex_display)
         self.sbs_hex.write_line(hex_display)
+
+        # Accumulate into line buffer and process complete lines
+        self._line_buffer += stream_str
+        while '\n' in self._line_buffer:
+            line, self._line_buffer = self._line_buffer.split('\n', 1)
+            self._write_ascii_line(line.rstrip('\r'))
+
+        # Safety flush: write oversized partial lines without CSV coloring
+        if len(self._line_buffer) > 4096:
+            self._write_ascii_line(self._line_buffer)
+            self._line_buffer = ''
 
         if self._file is not None:
             self._file.append(stream_str)
@@ -361,7 +398,6 @@ class SerialMonitorTab(Static):
 
     def sm_show_timestamp(self) -> None:
         self._show_timestamps = not self._show_timestamps
-        self._at_line_start = True  # reset so next line gets a fresh timestamp
         state = 'ON' if self._show_timestamps else 'OFF'
         self.app.notify(f'Timestamps {state}.')
 
@@ -375,7 +411,7 @@ class SerialMonitorTab(Static):
         self.sbs_log.clear()
         self.sbs_hex.clear()
         self._bytes_received = 0
-        self._at_line_start = True
+        self._line_buffer = ''
 
     def compose(self) -> ComposeResult:
         sbs = DualMonitor(log_monitor=self.log_monitor,
