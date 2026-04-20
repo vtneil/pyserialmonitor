@@ -60,6 +60,15 @@
 #sbs-log, #sbs-hex {
 }
 
+#hgroup-macros {
+    height: 1fr;
+}
+
+#macros-log {
+    width: 3fr;
+    height: 1fr;
+}
+
 .tab-content {
     width: 100%;
     height: 100%;

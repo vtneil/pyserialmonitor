@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 import time
 from datetime import datetime
 from pathlib import Path
@@ -76,14 +77,286 @@ _CSV_COLORS = [
     'bright_green', 'bright_magenta',
 ]
 
+_CONFIG_FILE = Path.home() / '.pyserialmon_config'
+
+_DEFAULT_PRESETS: dict[str, list[tuple[str, str]]] = {
+    'AT Commands': [
+        ('ATE0',       'ATE0'),
+        ('ATI',        'ATI'),
+        ('ATZ',        'ATZ'),
+        ('AT+GMR',     'AT+GMR'),
+        ('AT+CWMODE?', 'AT+CWMODE?'),
+        ('AT+CWLAP',   'AT+CWLAP'),
+        ('AT+RST',     'AT+RST'),
+    ],
+    'NMEA': [
+        ('PUBX,00', '$PUBX,00*33'),
+        ('PUBX,04', '$PUBX,04*37'),
+        ('GGA',     '$GPGGA'),
+        ('RMC',     '$GPRMC'),
+    ],
+}
+
+
+def _load_macro_config() -> dict[str, list[tuple[str, str]]]:
+    if _CONFIG_FILE.exists():
+        try:
+            raw = json.loads(_CONFIG_FILE.read_text())
+            return {k: [(m[0], m[1]) for m in v] for k, v in raw.get('presets', {}).items()}
+        except Exception:
+            pass
+    _save_macro_config(_DEFAULT_PRESETS)
+    return dict(_DEFAULT_PRESETS)
+
+
+def _save_macro_config(presets: dict[str, list[tuple[str, str]]]) -> None:
+    data = {'presets': {k: [list(m) for m in v] for k, v in presets.items()}}
+    _CONFIG_FILE.write_text(json.dumps(data, indent=2))
+
+
+class MacroSend(Message):
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self.text = text
+
+
+class MacroChanged(Message):
+    pass
+
+
+class MacroRow(Static):
+    DEFAULT_CSS = """
+    MacroRow {
+        height: auto;
+        layout: vertical;
+    }
+    MacroRow Horizontal {
+        height: auto;
+    }
+    MacroRow .macro-edit { display: none; }
+    MacroRow.editing .macro-normal { display: none; }
+    MacroRow.editing .macro-edit { display: block; }
+    MacroRow .btn-macro-send { width: 1fr; }
+    MacroRow .btn-macro-edit { width: 5; min-width: 5; }
+    MacroRow .btn-macro-delete { width: 5; min-width: 5; }
+    MacroRow .btn-macro-save { width: auto; }
+    MacroRow .btn-macro-cancel { width: auto; }
+    MacroRow .input-macro-label { width: 1fr; }
+    MacroRow .input-macro-text { width: 2fr; }
+    """
+
+    def __init__(self, label: str, text: str) -> None:
+        super().__init__()
+        self._label = label
+        self._text = text
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(classes='macro-normal'):
+            yield Button(self._label, classes='btn-macro-send')
+            yield Button('✎', classes='btn-macro-edit')
+            yield Button('✕', variant='error', classes='btn-macro-delete')
+        with Horizontal(classes='macro-edit'):
+            yield Input(value=self._label, placeholder='Label', classes='input-macro-label')
+            yield Input(value=self._text, placeholder='Text', classes='input-macro-text')
+            yield Button('✓', variant='success', classes='btn-macro-save')
+            yield Button('✕', classes='btn-macro-cancel')
+
+    @on(Button.Pressed, '.btn-macro-send')
+    def handle_send(self) -> None:
+        self.post_message(MacroSend(self._text))
+
+    @on(Button.Pressed, '.btn-macro-edit')
+    def handle_edit(self) -> None:
+        self.add_class('editing')
+
+    @on(Button.Pressed, '.btn-macro-save')
+    def handle_save(self) -> None:
+        label = self.query_one('.input-macro-label', Input).value.strip()
+        text = self.query_one('.input-macro-text', Input).value
+        if label:
+            self._label = label
+            self._text = text
+            self.query_one('.btn-macro-send', Button).label = label
+        self.remove_class('editing')
+        self.post_message(MacroChanged())
+
+    @on(Button.Pressed, '.btn-macro-cancel')
+    def handle_cancel(self) -> None:
+        self.query_one('.input-macro-label', Input).value = self._label
+        self.query_one('.input-macro-text', Input).value = self._text
+        self.remove_class('editing')
+
+    @on(Button.Pressed, '.btn-macro-delete')
+    def handle_delete(self) -> None:
+        self.remove()
+        self.post_message(MacroChanged())
+
+
+class MacrosPanel(Static):
+    DEFAULT_CSS = """
+    MacrosPanel {
+        height: 1fr;
+        width: 2fr;
+        border-left: tall $panel;
+        padding: 0 1;
+        layout: vertical;
+    }
+    MacrosPanel #preset-bar { height: auto; }
+    MacrosPanel #new-preset-bar { height: auto; display: none; }
+    MacrosPanel.adding-preset #new-preset-bar { display: block; }
+    MacrosPanel #macro-scroll { height: 1fr; width: 1fr; }
+    MacrosPanel #hgroup-macro-add { height: auto; width: 1fr; }
+    MacrosPanel #sel-macro-preset { width: 1fr; }
+    MacrosPanel #btn-preset-add { width: auto; min-width: 3; }
+    MacrosPanel #btn-preset-delete { width: auto; min-width: 3; }
+    MacrosPanel #input-new-preset { width: 1fr; }
+    MacrosPanel #btn-preset-create { width: auto; }
+    MacrosPanel #btn-preset-create-cancel { width: auto; }
+    MacrosPanel #input-macro-label { width: 1fr; }
+    MacrosPanel #input-macro-text { width: 2fr; }
+    MacrosPanel #btn-macro-add { width: auto; }
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._presets: dict[str, list[tuple[str, str]]] = _load_macro_config()
+        self._active_preset: str | None = next(iter(self._presets), None)
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id='preset-bar'):
+            yield Select(
+                [(k, k) for k in self._presets],
+                value=self._active_preset or Select.BLANK,
+                allow_blank=True,
+                prompt='Select preset…',
+                id='sel-macro-preset',
+            )
+            yield Button('+', id='btn-preset-add')
+            yield Button('✕', variant='error', id='btn-preset-delete')
+        with Horizontal(id='new-preset-bar'):
+            yield Input(placeholder='New preset name…', id='input-new-preset')
+            yield Button('Create', variant='success', id='btn-preset-create')
+            yield Button('Cancel', id='btn-preset-create-cancel')
+        yield VerticalScroll(id='macro-scroll')
+        with Horizontal(id='hgroup-macro-add'):
+            yield Input(placeholder='Label', id='input-macro-label')
+            yield Input(placeholder='Text to send', id='input-macro-text')
+            yield Button('Add', variant='success', id='btn-macro-add')
+
+    async def on_mount(self) -> None:
+        if self._active_preset:
+            await self._load_preset(self._active_preset)
+
+    # ── Preset helpers ────────────────────────────────────────────────────────
+
+    async def _load_preset(self, name: str) -> None:
+        self._active_preset = name
+        scroll = self.query_one('#macro-scroll', VerticalScroll)
+        await scroll.remove_children()
+        for label, text in self._presets.get(name, []):
+            await scroll.mount(MacroRow(label, text))
+
+    def _sync_and_save(self) -> None:
+        if self._active_preset is None:
+            return
+        scroll = self.query_one('#macro-scroll', VerticalScroll)
+        self._presets[self._active_preset] = [
+            (row._label, row._text) for row in scroll.query(MacroRow)
+        ]
+        _save_macro_config(self._presets)
+
+    def _update_select(self) -> None:
+        sel = self.query_one('#sel-macro-preset', Select)
+        sel.set_options([(k, k) for k in self._presets])
+        if self._active_preset in self._presets:
+            sel.value = self._active_preset
+        elif self._presets:
+            self._active_preset = next(iter(self._presets))
+            sel.value = self._active_preset
+        else:
+            self._active_preset = None
+
+    async def _create_preset(self) -> None:
+        name = self.query_one('#input-new-preset', Input).value.strip()
+        if not name:
+            return
+        if name in self._presets:
+            self.app.notify(f'Preset "{name}" already exists.', severity='warning')
+            return
+        self._presets[name] = []
+        _save_macro_config(self._presets)
+        self._update_select()
+        await self._load_preset(name)
+        self.query_one('#input-new-preset', Input).clear()
+        self.remove_class('adding-preset')
+
+    # ── Preset bar handlers ───────────────────────────────────────────────────
+
+    @on(Select.Changed, '#sel-macro-preset')
+    async def handle_preset_selected(self, event: Select.Changed) -> None:
+        if event.value is Select.BLANK or str(event.value) == self._active_preset:
+            return
+        await self._load_preset(str(event.value))
+
+    @on(Button.Pressed, '#btn-preset-add')
+    def handle_preset_add(self) -> None:
+        self.add_class('adding-preset')
+        self.query_one('#input-new-preset', Input).focus()
+
+    @on(Button.Pressed, '#btn-preset-create')
+    async def handle_preset_create(self) -> None:
+        await self._create_preset()
+
+    @on(Input.Submitted, '#input-new-preset')
+    async def handle_new_preset_submitted(self) -> None:
+        await self._create_preset()
+
+    @on(Button.Pressed, '#btn-preset-create-cancel')
+    def handle_preset_create_cancel(self) -> None:
+        self.query_one('#input-new-preset', Input).clear()
+        self.remove_class('adding-preset')
+
+    @on(Button.Pressed, '#btn-preset-delete')
+    async def handle_preset_delete(self) -> None:
+        if self._active_preset is None:
+            return
+        del self._presets[self._active_preset]
+        _save_macro_config(self._presets)
+        prev = self._active_preset
+        self._update_select()
+        scroll = self.query_one('#macro-scroll', VerticalScroll)
+        if self._active_preset and self._active_preset != prev:
+            await self._load_preset(self._active_preset)
+        else:
+            await scroll.remove_children()
+
+    # ── Macro list handlers ───────────────────────────────────────────────────
+
+    @on(Button.Pressed, '#btn-macro-add')
+    async def handle_macro_add(self) -> None:
+        label = self.query_one('#input-macro-label', Input).value.strip()
+        text = self.query_one('#input-macro-text', Input).value
+        if not label or not text or self._active_preset is None:
+            return
+        await self.query_one('#macro-scroll', VerticalScroll).mount(MacroRow(label, text))
+        self.query_one('#input-macro-label', Input).clear()
+        self.query_one('#input-macro-text', Input).clear()
+        self._sync_and_save()
+
+    @on(MacroChanged)
+    def handle_macro_changed(self) -> None:
+        self._sync_and_save()
+
 
 class DualMonitor(Static):
-    def __init__(self, log_monitor, hex_monitor, sbs_log, sbs_hex):
+    def __init__(self, log_monitor, hex_monitor, sbs_log, sbs_hex, macros_log, macros_panel):
         super().__init__()
         self.log_monitor = log_monitor
         self.hex_monitor = hex_monitor
         self.sbs_log = sbs_log
         self.sbs_hex = sbs_hex
+        self.macros_log = macros_log
+        self.macros_panel = macros_panel
 
     def compose(self) -> ComposeResult:
         with TabbedContent(id='tabbed-log'):
@@ -96,6 +369,10 @@ class DualMonitor(Static):
                     self.sbs_log,
                     self.sbs_hex,
                 ))
+            with TabPane('Macros'):
+                with Horizontal(id='hgroup-macros'):
+                    yield self.macros_log
+                    yield self.macros_panel
 
 
 class SerialMonitorTab(Static):
@@ -124,6 +401,7 @@ class SerialMonitorTab(Static):
         self._file: GCSFile | None = None
         self._baud_init = False
         self._show_timestamps = False
+        self._paused = False
         self._line_buffer: str = ''
         self._bytes_received = 0
         self._last_tab_label: str = ''
@@ -139,13 +417,15 @@ class SerialMonitorTab(Static):
             id='sel-baud',
         )
         self.btn_connect = Button('Connect', variant='success', id='btn-connect')
-        self.btn_close = Button('Close', variant='warning', id='btn-close')
+        self.btn_pause = Button('Pause', variant='warning', id='btn-pause')
+        self.btn_close = Button('Close', variant='error', id='btn-close')
         self.hgroup_serial = Horizontal(
             self.btn_clear,
             self.btn_refresh,
             self.sel_port,
             self.sel_baud,
             self.btn_connect,
+            self.btn_pause,
             self.btn_close,
             id='hgroup-serial',
         )
@@ -167,6 +447,12 @@ class SerialMonitorTab(Static):
         self.sbs_hex = Log(
             highlight=False, auto_scroll=True, max_lines=max_lines, id='sbs-hex'
         )
+
+        # MACROS MONITOR
+        self.macros_log = RichLog(
+            highlight=False, auto_scroll=True, max_lines=max_lines, id='macros-log'
+        )
+        self.macros_panel = MacrosPanel(id='macros-panel')
 
         # BOTTOM BAR
         self.input_user = HistoryInput(
@@ -253,6 +539,16 @@ class SerialMonitorTab(Static):
     @on(Button.Pressed, '#btn-close')
     def handle_close(self) -> None:
         self.post_message(self.CloseRequested(self._tab_index))
+
+    @on(Button.Pressed, '#btn-pause')
+    def handle_pause(self) -> None:
+        self._paused = not self._paused
+        if self._paused:
+            self.btn_pause.label = 'Resume'
+            self.btn_pause.variant = 'success'
+        else:
+            self.btn_pause.label = 'Pause'
+            self.btn_pause.variant = 'warning'
 
     @on(Select.Changed, '#sel-baud')
     def handle_baud_changed(self) -> None:
@@ -378,11 +674,12 @@ class SerialMonitorTab(Static):
             display = csv_text if csv_text is not None else Text(line)
         self.log_monitor.write(display)
         self.sbs_log.write(display)
+        self.macros_log.write(display)
 
     # ── Periodic update callbacks ─────────────────────────────────────────────
 
     def update_content(self) -> None:
-        if not self._serial_thread.size():
+        if self._paused or not self._serial_thread.size():
             return
 
         stream: bytes = self._serial_thread.get()
@@ -462,8 +759,23 @@ class SerialMonitorTab(Static):
         self.hex_monitor.clear()
         self.sbs_log.clear()
         self.sbs_hex.clear()
+        self.macros_log.clear()
         self._bytes_received = 0
         self._line_buffer = ''
+
+    @on(MacroSend)
+    def handle_macro_send(self, event: MacroSend) -> None:
+        text = event.text
+        cr, lf = self.sel_crlf.selection or (False, True)
+        if cr:
+            text += '\r'
+        if lf:
+            text += '\n'
+        if self._serial_port.is_connected():
+            try:
+                self._serial_port.device.write(text.encode())
+            except OSError as exc:
+                self.app.notify(f'Send failed: {exc}', severity='error')
 
     def compose(self) -> ComposeResult:
         sbs = DualMonitor(
@@ -471,6 +783,8 @@ class SerialMonitorTab(Static):
             hex_monitor=self.hex_monitor,
             sbs_log=self.sbs_log,
             sbs_hex=self.sbs_hex,
+            macros_log=self.macros_log,
+            macros_panel=self.macros_panel,
         )
         yield self.hgroup_serial
         yield Container(sbs, id='con-dual')
