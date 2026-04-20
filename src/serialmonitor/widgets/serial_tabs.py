@@ -2,17 +2,70 @@ import csv
 import io
 import time
 from datetime import datetime
+from pathlib import Path
 
 from libgcs.file import File as GCSFile
 from libgcs.serial_tools import ALL_BAUD, ALL_BAUD_STR, SerialPort, SerialReader, SerialThread
 from rich.text import Text
-from textual import on
+from textual import on, events
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, VerticalScroll, HorizontalScroll
-from textual.widgets import TabbedContent, TabPane, Placeholder, Static, Log, RichLog, Input, Button, Switch, Select, Label
+from textual.widgets import TabbedContent, TabPane, Placeholder, Static, Log, RichLog, Input, Button, Switch, Select, \
+    Label
 
 from ..utils.colors import *
 from ..utils import printable_bytes
+
+_HISTORY_FILE = Path.home() / '.pyserialmon_history'
+_HISTORY_MAX = 1000
+
+
+class HistoryInput(Input):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._history: list[str] = []
+        self._history_index: int = -1
+        self._current_draft: str = ''
+        self._load_history()
+
+    def _load_history(self) -> None:
+        if _HISTORY_FILE.exists():
+            self._history = [l for l in _HISTORY_FILE.read_text().splitlines() if l]
+
+    def _save_history(self) -> None:
+        _HISTORY_FILE.write_text('\n'.join(self._history[-_HISTORY_MAX:]) + '\n')
+
+    def add_to_history(self, text: str) -> None:
+        if text and (not self._history or self._history[-1] != text):
+            self._history.append(text)
+            self._save_history()
+        self._history_index = -1
+        self._current_draft = ''
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == 'up':
+            if not self._history:
+                return
+            event.prevent_default()
+            if self._history_index == -1:
+                self._current_draft = self.value
+                self._history_index = len(self._history) - 1
+            elif self._history_index > 0:
+                self._history_index -= 1
+            self.value = self._history[self._history_index]
+            self.cursor_position = len(self.value)
+        elif event.key == 'down':
+            if self._history_index == -1:
+                return
+            event.prevent_default()
+            if self._history_index < len(self._history) - 1:
+                self._history_index += 1
+                self.value = self._history[self._history_index]
+            else:
+                self._history_index = -1
+                self.value = self._current_draft
+            self.cursor_position = len(self.value)
+
 
 _CSV_COLORS = [
     'cyan', 'yellow', 'green', 'magenta',
@@ -59,9 +112,9 @@ class SerialMonitorTab(Static):
         self._serial_thread = thread
         self._port_con = False
         self._file: GCSFile | None = None
-        self._baud_init = False         # suppress first baud-rate changed event
+        self._baud_init = False  # suppress first baud-rate changed event
         self._show_timestamps = False
-        self._line_buffer: str = ''     # partial-line accumulator for CSV detection
+        self._line_buffer: str = ''  # partial-line accumulator for CSV detection
         self._bytes_received = 0
 
         # TOP BAR
@@ -131,7 +184,7 @@ class SerialMonitorTab(Static):
         )
 
         # BOTTOM BAR
-        self.input_user = Input(
+        self.input_user = HistoryInput(
             placeholder='Type here to send a message via Serial Port',
             valid_empty=True,
             id='input-user',
@@ -263,6 +316,7 @@ class SerialMonitorTab(Static):
     @on(Input.Submitted, '#input-user')
     def handle_send(self, _event: Button.Pressed | Input.Submitted) -> None:
         text = str(self.input_user.value)
+        self.input_user.add_to_history(text)
         self.input_user.clear()
 
         cr, lf = self.sel_crlf.selection or (False, True)
