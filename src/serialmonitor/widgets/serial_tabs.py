@@ -9,9 +9,12 @@ from libgcs.serial_tools import ALL_BAUD, ALL_BAUD_STR, SerialPort, SerialReader
 from rich.text import Text
 from textual import on, events
 from textual.app import ComposeResult
-from textual.containers import Container, Horizontal, VerticalScroll, HorizontalScroll
-from textual.widgets import TabbedContent, TabPane, Placeholder, Static, Log, RichLog, Input, Button, Switch, Select, \
-    Label
+from textual.containers import Container, Horizontal, VerticalScroll, HorizontalScroll, Vertical
+from textual.message import Message
+from textual.widgets import (
+    TabbedContent, TabPane, Tab, Placeholder, Static, Log, RichLog,
+    Input, Button, Switch, Select, Label,
+)
 
 from ..utils.colors import *
 from ..utils import printable_bytes
@@ -96,6 +99,11 @@ class DualMonitor(Static):
 
 
 class SerialMonitorTab(Static):
+    class CloseRequested(Message):
+        def __init__(self, tab_index: int) -> None:
+            super().__init__()
+            self.tab_index = tab_index
+
     SM_OPTIONS = [
         ('No Line', (False, False)),
         ('LF Only', (False, True)),
@@ -103,84 +111,61 @@ class SerialMonitorTab(Static):
         ('Both CRLF', (True, True))
     ]
 
-    def __init__(self, port: SerialPort, reader: SerialReader, thread: SerialThread, /,
-                 max_lines: int | None = None, *args, **kwargs) -> None:
+    def __init__(self, tab_index: int, /, max_lines: int | None = None, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        self._serial_port = port
-        self._serial_reader = reader
-        self._serial_thread = thread
+        self._tab_index = tab_index
+        self._serial_port = SerialPort()
+        self._serial_reader = SerialReader(self._serial_port)
+        self._serial_thread = SerialThread(self._serial_reader)
+        self._serial_thread.start()
+
         self._port_con = False
         self._file: GCSFile | None = None
-        self._baud_init = False  # suppress first baud-rate changed event
+        self._baud_init = False
         self._show_timestamps = False
-        self._line_buffer: str = ''  # partial-line accumulator for CSV detection
+        self._line_buffer: str = ''
         self._bytes_received = 0
+        self._last_tab_label: str = ''
 
         # TOP BAR
-        self.btn_clear = Button(
-            'Clear',
-            variant='default',
-            id='btn-clear'
-        )
-        self.btn_refresh = Button(
-            'Refresh',
-            variant='default',
-            id='btn-refresh'
-        )
-        self.sel_port = Select(
-            [],
-            prompt='Select a serial Port',
-            id='sel-port'
-        )
+        self.btn_clear = Button('Clear', variant='default', id='btn-clear')
+        self.btn_refresh = Button('Refresh', variant='default', id='btn-refresh')
+        self.sel_port = Select([], prompt='Select a serial Port', id='sel-port')
         self.sel_baud = Select(
             list(zip(ALL_BAUD_STR, ALL_BAUD)),
             allow_blank=False,
             value=115200,
-            id='sel-baud'
+            id='sel-baud',
         )
-        self.btn_connect = Button(
-            'Connect',
-            variant='success',
-            id='btn-connect'
-        )
+        self.btn_connect = Button('Connect', variant='success', id='btn-connect')
+        self.btn_close = Button('Close', variant='warning', id='btn-close')
         self.hgroup_serial = Horizontal(
             self.btn_clear,
             self.btn_refresh,
             self.sel_port,
             self.sel_baud,
             self.btn_connect,
-            id='hgroup-serial'
+            self.btn_close,
+            id='hgroup-serial',
         )
 
         # LOG MONITOR
         self.log_monitor = RichLog(
-            highlight=False,
-            auto_scroll=True,
-            max_lines=max_lines,
-            id='log-monitor'
+            highlight=False, auto_scroll=True, max_lines=max_lines, id='log-monitor'
         )
 
         # HEX MONITOR
         self.hex_monitor = Log(
-            highlight=False,
-            auto_scroll=True,
-            max_lines=max_lines,
-            id='hex-monitor'
+            highlight=False, auto_scroll=True, max_lines=max_lines, id='hex-monitor'
         )
 
         # SBS MONITOR
         self.sbs_log = RichLog(
-            highlight=False,
-            auto_scroll=True,
-            max_lines=max_lines,
-            id='sbs-log'
+            highlight=False, auto_scroll=True, max_lines=max_lines, id='sbs-log'
         )
         self.sbs_hex = Log(
-            highlight=False,
-            auto_scroll=True,
-            max_lines=max_lines,
-            id='sbs-hex'
+            highlight=False, auto_scroll=True, max_lines=max_lines, id='sbs-hex'
         )
 
         # BOTTOM BAR
@@ -188,28 +173,20 @@ class SerialMonitorTab(Static):
             placeholder='Type here to send a message via Serial Port',
             valid_empty=True,
             id='input-user',
-            disabled=True
+            disabled=True,
         )
-        self.btn_send = Button(
-            'Send',
-            variant='primary',
-            id='btn-send',
-            disabled=True
-        )
+        self.btn_send = Button('Send', variant='primary', id='btn-send', disabled=True)
         self.sel_crlf = Select(
-            self.SM_OPTIONS,
-            allow_blank=False,
-            value=(False, True),
-            id='sel-crlf'
+            self.SM_OPTIONS, allow_blank=False, value=(False, True), id='sel-crlf'
         )
         self.sw_capture = Switch(id='sw-capture')
         self.hgroup_user = Horizontal(
             self.sw_capture,
             Label('Capture', id='label-capture'),
-            Container(self.input_user),
+            Container(self.input_user, id='con-input-user'),
             self.sel_crlf,
             self.btn_send,
-            id='hgroup-user'
+            id='hgroup-user',
         )
 
     # ── UI state helpers ──────────────────────────────────────────────────────
@@ -228,6 +205,21 @@ class SerialMonitorTab(Static):
         self.btn_connect.variant = 'success'
         self.btn_connect.label = 'Connect'
 
+    def _is_active_tab(self) -> bool:
+        try:
+            return self.app.query_one(SerialTabs).active_monitor is self
+        except Exception:
+            return True
+
+    def _update_tab_label(self, label: str) -> None:
+        if label == self._last_tab_label:
+            return
+        self._last_tab_label = label
+        try:
+            self.app.query_one(f'Tab#pane-monitor-{self._tab_index}', Tab).label = label
+        except Exception:
+            pass
+
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def on_mount(self) -> None:
@@ -238,6 +230,13 @@ class SerialMonitorTab(Static):
 
         self.set_interval(0.050, self.update_content)
         self.set_interval(0.050, self.update_status)
+
+    def on_unmount(self) -> None:
+        self._serial_port.disconnect()
+        try:
+            self._serial_thread.stop()
+        except Exception:
+            pass
 
     # ── Top-bar handlers ──────────────────────────────────────────────────────
 
@@ -251,9 +250,12 @@ class SerialMonitorTab(Static):
             self.sel_port.value = current_value
         self.app.notify('Port list refreshed.')
 
+    @on(Button.Pressed, '#btn-close')
+    def handle_close(self) -> None:
+        self.post_message(self.CloseRequested(self._tab_index))
+
     @on(Select.Changed, '#sel-baud')
     def handle_baud_changed(self) -> None:
-        # Suppress the synthetic event fired during widget initialisation.
         if not self._baud_init:
             self._baud_init = True
             return
@@ -271,7 +273,6 @@ class SerialMonitorTab(Static):
 
     @on(Select.Changed, '#sel-port')
     def handle_port_changed(self) -> None:
-        # Only act when already connected – switch to the newly selected port.
         if self._port_con and self._serial_port.is_connected():
             port = str(self.sel_port.selection or '')
             baud = int(self.sel_baud.selection or 115200)
@@ -286,9 +287,7 @@ class SerialMonitorTab(Static):
     @on(Button.Pressed, '#btn-connect')
     def handle_connect(self) -> None:
         if not self._port_con:
-            # ── Connect ───────────────────────────────────────────────────────
             if self._serial_port.is_connected():
-                # Stale state: already connected but flag says otherwise.
                 self._serial_port.disconnect()
 
             port = self.sel_port.selection
@@ -305,7 +304,6 @@ class SerialMonitorTab(Static):
             else:
                 self.app.notify(f'Failed to connect to {port}.', severity='error')
         else:
-            # ── Disconnect ────────────────────────────────────────────────────
             self._serial_port.disconnect()
             self._set_disconnected_state()
             self.app.notify('Disconnected.')
@@ -352,7 +350,6 @@ class SerialMonitorTab(Static):
 
     @staticmethod
     def _colorize_csv(line: str) -> Text | None:
-        """Return a Rich Text with each CSV column in a distinct color, or None if not CSV."""
         if ',' not in line:
             return None
         try:
@@ -369,7 +366,6 @@ class SerialMonitorTab(Static):
         return result
 
     def _write_ascii_line(self, line: str) -> None:
-        """Write one logical line (no trailing newline) to the ASCII monitors."""
         csv_text = self._colorize_csv(line)
         if self._show_timestamps:
             ts = self._format_timestamp()
@@ -402,13 +398,11 @@ class SerialMonitorTab(Static):
         self.hex_monitor.write_line(hex_display)
         self.sbs_hex.write_line(hex_display)
 
-        # Accumulate into line buffer and process complete lines
         self._line_buffer += stream_str
         while '\n' in self._line_buffer:
             line, self._line_buffer = self._line_buffer.split('\n', 1)
             self._write_ascii_line(line.rstrip('\r'))
 
-        # Safety flush: write oversized partial lines without CSV coloring
         if len(self._line_buffer) > 4096:
             self._write_ascii_line(self._line_buffer)
             self._line_buffer = ''
@@ -417,6 +411,9 @@ class SerialMonitorTab(Static):
             self._file.append(stream_str)
 
     def update_status(self) -> None:
+        if not self._is_active_tab():
+            return
+
         label_status: Label = self.app.query_one('#label-status', Label)
 
         kb = self._bytes_received / 1024
@@ -426,12 +423,12 @@ class SerialMonitorTab(Static):
             self.input_user.disabled = False
             self.btn_send.disabled = False
             if not self._port_con:
-                # Auto-reconnect succeeded – sync button state.
                 self._set_connected_state()
             label_status.styles.background = StatusColor.GREEN
             label_status.update(
                 f'CONNECTED to {self._serial_port.name} @ {self._serial_port.baud} baud  |  RX {rx}'
             )
+            self._update_tab_label(f'Device {self._tab_index} [{self._serial_port.name}]')
         elif self._serial_port.is_reconnecting():
             self.input_user.disabled = True
             self.btn_send.disabled = True
@@ -439,14 +436,15 @@ class SerialMonitorTab(Static):
             label_status.update(
                 f'RECONNECTING to {self._serial_port.name} @ {self._serial_port.baud} baud…'
             )
+            self._update_tab_label(f'Device {self._tab_index} [reconnecting…]')
         else:
             self.input_user.disabled = True
             self.btn_send.disabled = True
             if self._port_con:
-                # Device was lost – sync button state.
                 self._set_disconnected_state()
             label_status.styles.background = StatusColor.RED
             label_status.update(f'DISCONNECTED  |  RX {rx}')
+            self._update_tab_label(f'Device {self._tab_index}')
 
     # ── Action methods (called from app bindings) ─────────────────────────────
 
@@ -468,14 +466,15 @@ class SerialMonitorTab(Static):
         self._line_buffer = ''
 
     def compose(self) -> ComposeResult:
-        sbs = DualMonitor(log_monitor=self.log_monitor,
-                          hex_monitor=self.hex_monitor,
-                          sbs_log=self.sbs_log,
-                          sbs_hex=self.sbs_hex)
-        with VerticalScroll():
-            yield self.hgroup_serial
-            yield Container(sbs, id='con-dual')
-            yield self.hgroup_user
+        sbs = DualMonitor(
+            log_monitor=self.log_monitor,
+            hex_monitor=self.hex_monitor,
+            sbs_log=self.sbs_log,
+            sbs_hex=self.sbs_hex,
+        )
+        yield self.hgroup_serial
+        yield Container(sbs, id='con-dual')
+        yield self.hgroup_user
 
 
 class SerialSettingsTab(Static):
@@ -487,18 +486,67 @@ class SerialSettingsTab(Static):
 
 
 class SerialTabs(Static):
-    def __init__(self, port: SerialPort, reader: SerialReader, thread: SerialThread, /,
-                 max_lines: int | None = None, *args, **kwargs) -> None:
+    def __init__(self, max_lines: int | None = None, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.tab_monitor = SerialMonitorTab(port, reader, thread,
-                                            max_lines=max_lines,
-                                            id='tab-monitor', classes='tab-content')
-        self.tab_settings = SerialSettingsTab(id='tab-settings', classes='tab-content')
+        self._max_lines = max_lines
+        self._tab_counter = 0
+
+    def _make_monitor_tab(self) -> tuple[int, SerialMonitorTab]:
+        self._tab_counter += 1
+        n = self._tab_counter
+        tab = SerialMonitorTab(
+            n, max_lines=self._max_lines,
+            id=f'tab-monitor-{n}', classes='tab-content',
+        )
+        return n, tab
+
+    def _new_monitor_pane(self) -> TabPane:
+        n, tab = self._make_monitor_tab()
+        return TabPane(f'Device {n}', Container(tab), id=f'pane-monitor-{n}')
 
     def compose(self) -> ComposeResult:
-        with TabbedContent():
-            with TabPane('Monitor'):
-                yield Container(self.tab_monitor)
+        n, tab = self._make_monitor_tab()
+        with TabbedContent(id='tabs-main'):
+            with TabPane(f'Device {n}', id=f'pane-monitor-{n}'):
+                yield Container(tab)
+            with TabPane('+', id='pane-add'):
+                pass
+            with TabPane('Settings', id='pane-settings'):
+                yield SerialSettingsTab(id='tab-settings', classes='tab-content')
 
-            with TabPane('Settings'):
-                yield Container(self.tab_settings)
+    @property
+    def active_monitor(self) -> SerialMonitorTab | None:
+        try:
+            active = self.query_one('#tabs-main', TabbedContent).active
+            if not active or not active.startswith('pane-monitor-'):
+                return None
+            return self.query_one(f'#{active}').query_one(SerialMonitorTab)
+        except Exception:
+            return None
+
+    async def add_device(self) -> None:
+        tabs = self.query_one('#tabs-main', TabbedContent)
+        pane = self._new_monitor_pane()
+        await tabs.add_pane(pane, before='pane-add')
+        tabs.active = f'pane-monitor-{self._tab_counter}'
+
+    @on(TabbedContent.TabActivated, '#tabs-main')
+    async def handle_add_tab_clicked(self, event: TabbedContent.TabActivated) -> None:
+        if event.pane and event.pane.id == 'pane-add':
+            await self.add_device()
+
+    @on(SerialMonitorTab.CloseRequested)
+    async def handle_close_tab(self, event: SerialMonitorTab.CloseRequested) -> None:
+        tabs = self.query_one('#tabs-main', TabbedContent)
+        pane_id = f'pane-monitor-{event.tab_index}'
+        monitor_panes = [
+            p for p in tabs.query(TabPane)
+            if p.id and p.id.startswith('pane-monitor-')
+        ]
+        if len(monitor_panes) <= 1:
+            self.app.notify('Cannot close the last device tab.', severity='warning')
+            return
+        other = next((p for p in monitor_panes if p.id != pane_id), None)
+        if other:
+            tabs.active = other.id
+        await tabs.remove_pane(pane_id)
