@@ -405,6 +405,8 @@ class SerialMonitorTab(Static):
         self._line_buffer: str = ''
         self._bytes_received = 0
         self._last_tab_label: str = ''
+        self._known_ports: dict[str, str] | None = None
+        self._connecting: bool = False
 
         # TOP BAR
         self.btn_clear = Button('Clear', variant='default', id='btn-clear')
@@ -509,13 +511,15 @@ class SerialMonitorTab(Static):
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def on_mount(self) -> None:
-        options = tuple(SerialPort.ports().items())
+        ports = SerialPort.ports()
+        self._known_ports = dict(ports)
+        options = tuple(ports.items())
         if options:
             self.sel_port.set_options(options)
             self.sel_port.value = options[0][1]
-
         self.set_interval(0.050, self.update_content)
         self.set_interval(0.050, self.update_status)
+        self.set_interval(1.5, self._poll_for_new_ports)
 
     def on_unmount(self) -> None:
         self._serial_port.disconnect()
@@ -524,16 +528,107 @@ class SerialMonitorTab(Static):
         except Exception:
             pass
 
+    # ── Port management ───────────────────────────────────────────────────────
+
+    def _apply_ports(self, ports: dict[str, str], *, select_first: bool = False) -> None:
+        self._known_ports = dict(ports)
+        if not ports:
+            return
+        options = tuple(ports.items())
+        current_value = self.sel_port.value
+        self.sel_port.set_options(options)
+        if select_first:
+            self.sel_port.value = options[0][1]
+        elif current_value in ports.values():
+            self.sel_port.value = current_value
+
+    def _poll_for_new_ports(self) -> None:
+        if self._known_ports is None or self._connecting:
+            return
+        self.run_worker(self._scan_for_new_ports, thread=True, group='port-scan', exclusive=True, exit_on_error=False)
+
+    def _scan_for_new_ports(self) -> None:
+        try:
+            current = SerialPort.ports()
+        except Exception:
+            return
+        self.app.call_from_thread(lambda: self._handle_port_changes(current))
+
+    def _handle_port_changes(self, current: dict[str, str]) -> None:
+        if self._known_ports is None:
+            return
+        current_devs = set(current.values())
+        known_devs = set(self._known_ports.values())
+        new_devs = current_devs - known_devs
+        removed_devs = known_devs - current_devs
+
+        if new_devs or removed_devs:
+            current_value = self.sel_port.value
+            self.sel_port.set_options(tuple(current.items()))
+            if current_value in current_devs:
+                self.sel_port.value = current_value
+            self._known_ports = dict(current)
+
+        # If the active port was physically removed, stop the reconnect loop immediately
+        active_port = self._serial_port.name
+        if (removed_devs and active_port in removed_devs
+                and not self._connecting
+                and (self._port_con or self._serial_port.is_reconnecting())):
+            self._set_disconnected_state()
+            self.run_worker(self._serial_port.disconnect, thread=True, group='connect', exit_on_error=False)
+            return
+
+        # Auto-connect to a newly detected port when idle
+        if new_devs and not self._port_con and not self._serial_port.is_connected() and not self._connecting:
+            new_dev = sorted(new_devs)[0]
+            baud = int(self.sel_baud.selection or 115200)
+            self.sel_port.value = new_dev
+            self._start_connect(new_dev, baud, f'Auto-connected to {new_dev} at {baud} baud.')
+
+    def _start_connect(self, port: str, baud: int, success_msg: str) -> None:
+        if self._connecting:
+            return
+        self._connecting = True
+        self.btn_connect.disabled = True
+        self.btn_connect.label = 'Connecting…'
+
+        def _work():
+            try:
+                if self._serial_port.is_connected():
+                    self._serial_port.disconnect()
+                self._serial_port.refresh()
+                success = self._serial_port.connect(port, baud)
+            except Exception:
+                success = False
+            self.app.call_from_thread(lambda: self._on_connect_done(success, port, baud, success_msg))
+
+        self.run_worker(_work, thread=True, group='connect', exit_on_error=False)
+
+    def _on_connect_done(self, success: bool, port: str, baud: int, success_msg: str) -> None:
+        self._connecting = False
+        self.btn_connect.disabled = False
+        if success:
+            self._set_connected_state()
+            self.app.notify(success_msg, severity='information')
+        else:
+            self._set_disconnected_state()
+            self.app.notify(f'Failed to connect to {port}.', severity='error')
+
     # ── Top-bar handlers ──────────────────────────────────────────────────────
 
     @on(Button.Pressed, '#btn-refresh')
     def handle_refresh(self) -> None:
-        self._serial_port.refresh()
-        options = SerialPort.ports()
-        current_value = self.sel_port.value
-        self.sel_port.set_options(tuple(options.items()))
-        if current_value in options.values():
-            self.sel_port.value = current_value
+        def _work():
+            try:
+                self._serial_port.refresh()
+                ports = SerialPort.ports()
+            except Exception:
+                ports = {}
+            self.app.call_from_thread(lambda: self._on_refresh_done(ports))
+        self.run_worker(_work, thread=True, group='port-scan', exclusive=True, exit_on_error=False)
+
+    def _on_refresh_done(self, ports: dict[str, str]) -> None:
+        self._apply_ports(ports)
         self.app.notify('Port list refreshed.')
 
     @on(Button.Pressed, '#btn-close')
@@ -555,50 +650,31 @@ class SerialMonitorTab(Static):
         if not self._baud_init:
             self._baud_init = True
             return
-
         if self._port_con and self._serial_port.is_connected():
             port = self._serial_port.name
             baud = int(self.sel_baud.selection or 115200)
-            self._serial_port.disconnect()
-            success = port is not None and self._serial_port.connect(port, baud)
-            if success:
-                self.app.notify(f'Reconnected at {baud} baud.')
-            else:
-                self._set_disconnected_state()
-                self.app.notify(f'Could not reconnect at {baud} baud.', severity='error')
+            self._set_disconnected_state()
+            if port:
+                self._start_connect(port, baud, f'Reconnected at {baud} baud.')
 
     @on(Select.Changed, '#sel-port')
     def handle_port_changed(self) -> None:
         if self._port_con and self._serial_port.is_connected():
             port = str(self.sel_port.selection or '')
             baud = int(self.sel_baud.selection or 115200)
-            self._serial_port.disconnect()
-            success = bool(port) and self._serial_port.connect(port, baud)
-            if success:
-                self.app.notify(f'Switched to {port}.')
-            else:
-                self._set_disconnected_state()
-                self.app.notify(f'Could not connect to {port}.', severity='error')
+            self._set_disconnected_state()
+            if port:
+                self._start_connect(port, baud, f'Switched to {port}.')
 
     @on(Button.Pressed, '#btn-connect')
     def handle_connect(self) -> None:
         if not self._port_con:
-            if self._serial_port.is_connected():
-                self._serial_port.disconnect()
-
             port = self.sel_port.selection
             baud = self.sel_baud.selection
-
             if port is None:
                 self.app.notify('No serial port selected.', severity='warning')
                 return
-
-            success = self._serial_port.connect(str(port), int(baud or 115200))
-            if success:
-                self._set_connected_state()
-                self.app.notify(f'Connected to {port} at {baud} baud.', severity='information')
-            else:
-                self.app.notify(f'Failed to connect to {port}.', severity='error')
+            self._start_connect(str(port), int(baud or 115200), f'Connected to {port} at {baud} baud.')
         else:
             self._serial_port.disconnect()
             self._set_disconnected_state()
@@ -726,7 +802,7 @@ class SerialMonitorTab(Static):
                 f'CONNECTED to {self._serial_port.name} @ {self._serial_port.baud} baud  |  RX {rx}'
             )
             self._update_tab_label(f'Device {self._tab_index} [{self._serial_port.name}]')
-        elif self._serial_port.is_reconnecting():
+        elif self._serial_port.is_reconnecting() and self._port_con:
             self.input_user.disabled = True
             self.btn_send.disabled = True
             label_status.styles.background = StatusColor.ORANGE
